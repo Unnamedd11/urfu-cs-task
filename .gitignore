@@ -1,0 +1,18 @@
+# Build directories
+build/
+cmake-build-*/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+CTestTestfile.cmake
+cmake_install.cmake
+Makefile
+compile_commands.json
+Testing/
+
+# Test binaries / artifacts
+callback_scheduler_tests
+
+# macOS
+.DS_Store
