@@ -1,46 +1,72 @@
-#pragma once
+#include "callback_scheduler.h"
+#include <iostream>
 
-#include <chrono>
-#include <functional>
-#include <mutex>
-#include <condition_variable>
-#include <queue>
-#include <set>
-#include <thread>
+CallbackScheduler::CallbackScheduler() {
+    worker_thread_ = std::thread(&CallbackScheduler::WorkerLoop, this);
+}
 
-class CallbackScheduler {
-public:
-    using TimePoint = std::chrono::time_point<std::chrono::system_clock>;
-    using TaskId = std::uint64_t;
+CallbackScheduler::~CallbackScheduler() {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stop_ = true;
+    }
+    cv_.notify_all();
+    if (worker_thread_.joinable()) {
+        worker_thread_.join();
+    }
+}
 
-    CallbackScheduler();
-    ~CallbackScheduler();
+CallbackScheduler::TaskId CallbackScheduler::Schedule(std::function<void()> callback, TimePoint when) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    TaskId id = next_id_++;
+    tasks_.push(Task{id, std::move(callback), when});
+    
+    cv_.notify_one(); 
+    return id;
+}
 
-    CallbackScheduler(const CallbackScheduler&) = delete;
-    CallbackScheduler& operator=(const CallbackScheduler&) = delete;
+bool CallbackScheduler::Cancel(TaskId id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    cancelled_tasks_.insert(id);
+    return true; 
+}
 
-    TaskId Schedule(std::function<void()> callback, TimePoint when);
-    bool Cancel(TaskId id);
+void CallbackScheduler::WorkerLoop() {
+    while (true) {
+        std::unique_lock<std::mutex> lock(mutex_);
 
-private:
-    struct Task {
-        TaskId id;
-        std::function<void()> callback;
-        TimePoint when;
-
-        bool operator>(const Task& other) const {
-            return when > other.when;
+        while (tasks_.empty() && !stop_) {
+            cv_.wait(lock);
         }
-    };
 
-    void WorkerLoop();
+        if (stop_) {
+            return;
+        }
 
-    std::mutex mutex_;
-    std::condition_variable cv_;
-    std::priority_queue<Task, std::vector<Task>, std::greater<Task>> tasks_;
-    std::set<TaskId> cancelled_tasks_;
+        auto now = std::chrono::system_clock::now();
+        auto closest_task_time = tasks_.top().when;
 
-    TaskId next_id_ = 1;
-    bool stop_ = false;
-    std::thread worker_thread_;
-};
+        if (now >= closest_task_time) {
+            Task task = std::move(const_cast<Task&>(tasks_.top()));
+            tasks_.pop();
+
+            auto it = cancelled_tasks_.find(task.id);
+            if (it != cancelled_tasks_.end()) {
+                cancelled_tasks_.erase(it);
+                continue;
+            }
+
+            lock.unlock(); 
+
+            try {
+                if (task.callback) {
+                    task.callback();
+                }
+            } catch (...) {
+            }
+        } else {
+            cv_.wait_until(lock, closest_task_time);
+        }
+    }
+}
